@@ -24,12 +24,14 @@ build/
 # ── ChromaDB / Vector Store ────────────────────────────────────────────────────
 chroma_db/
 *.sqlite3
+*.pkl
 
 # ── Data Files ─────────────────────────────────────────────────────────────────
 # data/
 # *.pdf
 #*.csv
 evaluation_results.csv
+retrieval_results.csv
 *.parquet
 
 # ── Test Output ────────────────────────────────────────────────────────────────

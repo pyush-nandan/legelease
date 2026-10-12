@@ -37,14 +37,8 @@ def load_retriever():
 @st.cache_resource(show_spinner=False)
 def load_llm():
     """Cache the Groq LLM client."""
-    from langchain_groq import ChatGroq
-    return ChatGroq(
-        model_name="llama-3.1-8b-instant",
-        temperature=0.2,
-        max_tokens=1000,
-        timeout=None,
-        max_retries=3,
-    )
+    from main import build_llm
+    return build_llm()
 
 
 def build_chain(retriever, llm, system_prompt, human_prompt):
@@ -52,16 +46,8 @@ def build_chain(retriever, llm, system_prompt, human_prompt):
 
     This is cheap — it only wires together already-loaded objects.
     """
-    from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-    from langchain_classic.chains import create_retrieval_chain
-    from langchain_core.prompts import ChatPromptTemplate
-
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", human_prompt),
-    ])
-    doc_chain = create_stuff_documents_chain(llm, prompt_template)
-    return create_retrieval_chain(retriever, doc_chain)
+    from main import build_rag_chain
+    return build_rag_chain(retriever, llm, system_prompt, human_prompt)
 
 
 @st.cache_data(show_spinner=False)
@@ -70,7 +56,7 @@ def get_ingested_documents():
     from ingest_data import init_vectorstore
     try:
         vs = init_vectorstore()
-        raw = vs._collection.get(include=["metadatas"])
+        raw = vs.get(include=["metadatas"])
         filenames = set()
         for meta in raw["metadatas"]:
             if "filename" in meta:
@@ -89,6 +75,13 @@ st.session_state.setdefault("use_custom_prompt", False)
 st.session_state.setdefault("custom_system_prompt", "")
 st.session_state.setdefault("ingested_this_session", set())
 
+# Uploads write into the knowledge base every visitor shares. Set
+# ENABLE_UPLOADS=false on a public deployment to turn them off.
+UPLOADS_ENABLED = os.getenv("ENABLE_UPLOADS", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", 25))
+
 # Load prompt config
 prompt_config = load_prompts()
 prompt_versions = list(prompt_config["prompts"].keys())
@@ -104,11 +97,15 @@ with st.sidebar:
     # ── Document management ─────────────────────────────────────────────
     st.header(":material/folder_open: Documents", anchor=False)
 
-    uploaded_files = st.file_uploader(
-        "Upload legal documents",
-        type=["pdf"],
-        accept_multiple_files=True,
-    )
+    if UPLOADS_ENABLED:
+        uploaded_files = st.file_uploader(
+            "Upload legal documents",
+            type=["pdf"],
+            accept_multiple_files=True,
+        )
+    else:
+        uploaded_files = []
+        st.caption(":material/lock:  Uploads are disabled on this deployment.")
 
     if uploaded_files:
         new_uploads = [
@@ -123,8 +120,18 @@ with st.sidebar:
 
             # Save files to ./data
             for uf in new_uploads:
-                filepath = os.path.join("data", uf.name)
-                if uf.name in existing_docs and os.path.exists(filepath):
+                # Never trust the client-supplied name as a path
+                safe_name = os.path.basename(uf.name.replace("\\", "/"))
+                filepath = os.path.join("data", safe_name)
+                if safe_name != uf.name or not safe_name.lower().endswith(".pdf"):
+                    file_statuses[uf.name] = "error:invalid file name"
+                elif uf.size > MAX_UPLOAD_MB * 1024 * 1024:
+                    file_statuses[uf.name] = (
+                        f"error:larger than the {MAX_UPLOAD_MB} MB limit"
+                    )
+                elif not uf.getvalue().startswith(b"%PDF"):
+                    file_statuses[uf.name] = "error:not a valid PDF file"
+                elif uf.name in existing_docs and os.path.exists(filepath):
                     file_statuses[uf.name] = "already"
                 else:
                     try:
@@ -147,9 +154,15 @@ with st.sidebar:
                         new_existing = set(get_ingested_documents())
 
                         for name in needs_ingest:
-                            file_statuses[name] = (
-                                "success" if name in new_existing else "failed"
-                            )
+                            if name in new_existing:
+                                file_statuses[name] = "success"
+                            else:
+                                file_statuses[name] = "failed"
+                                # Don't leave an unreadable file to be retried on every start
+                                try:
+                                    os.remove(os.path.join("data", name))
+                                except OSError:
+                                    pass
 
                         # Clear retriever caches so new docs are picked up
                         load_retriever.clear()
@@ -322,6 +335,8 @@ for entry in st.session_state.messages:
         st.markdown(entry["question"])
 
     with st.chat_message("assistant"):
+        if entry.get("search_query"):
+            st.caption(f":material/search:  Searched as: {entry['search_query']}")
         if entry.get("no_answer"):
             st.warning(
                 "The documents don't contain sufficient information "
@@ -346,12 +361,17 @@ if user_query := st.chat_input("Ask a legal question…"):
             retriever = load_retriever()
             llm = load_llm()
 
+            from main import condense_question, prepare_custom_prompt
+            from text_utils import is_no_answer
+
             # Resolve prompt
             if (
                 st.session_state.use_custom_prompt
                 and st.session_state.custom_system_prompt.strip()
             ):
-                system_p = st.session_state.custom_system_prompt
+                system_p = prepare_custom_prompt(
+                    st.session_state.custom_system_prompt
+                )
                 human_p = "{input}"
             else:
                 ver = st.session_state.get(
@@ -360,8 +380,16 @@ if user_query := st.chat_input("Ask a legal question…"):
                 system_p = prompt_config["prompts"][ver]["system"]
                 human_p = prompt_config["prompts"][ver]["human"]
 
+            # Follow-ups ("what about the notice period?") are rewritten into a
+            # standalone question using the recent conversation
+            history = [
+                (m["question"], m["answer"])
+                for m in st.session_state.messages
+            ]
+            search_query = condense_question(llm, history, user_query)
+
             chain = build_chain(retriever, llm, system_p, human_p)
-            response = chain.invoke({"input": user_query})
+            response = chain.invoke({"input": search_query})
 
         answer = response["answer"]
         sources = [
@@ -375,21 +403,13 @@ if user_query := st.chat_input("Ask a legal question…"):
         ]
 
         # Detect "no answer" / "I don't know" responses
-        _low = answer.lower()
-        is_no_answer = any(
-            phrase in _low
-            for phrase in [
-                "i don't know",
-                "don't have enough",
-                "insufficient",
-                "cannot answer",
-                "don't fully address",
-                "do not contain",
-                "not contain sufficient",
-            ]
-        )
+        no_answer = is_no_answer(answer)
+        rewritten_query = search_query if search_query != user_query else None
 
-        if is_no_answer:
+        if rewritten_query:
+            st.caption(f":material/search:  Searched as: {rewritten_query}")
+
+        if no_answer:
             st.warning(
                 "The documents don't contain sufficient information "
                 "to fully answer this question.",
@@ -404,5 +424,6 @@ if user_query := st.chat_input("Ask a legal question…"):
         "question": user_query,
         "answer": answer,
         "sources": sources,
-        "no_answer": is_no_answer,
+        "no_answer": no_answer,
+        "search_query": rewritten_query,
     })
