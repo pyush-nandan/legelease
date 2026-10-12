@@ -281,7 +281,7 @@ with st.sidebar:
         st.rerun()
 
     st.space("small")
-    st.caption("LegalEase · LLaMA 3.1 · Cohere Rerank · ChromaDB")
+    st.caption("LegalEase · GPT-OSS on Groq · Cohere Rerank · ChromaDB")
 
 
 # ═══════════════════════════════════════════════════════════════════════

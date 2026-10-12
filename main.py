@@ -12,7 +12,8 @@ from retriever import get_retriever
 
 load_dotenv()
 
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+# Groq retired llama-3.1-8b-instant on 16 Aug 2026; gpt-oss-20b is its named replacement
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
 DOCUMENT_SEPARATOR = "\n\n---\n\n"
 CONTEXT_BLOCK = "\n\nRetrieved Context:\n{context}"
 
@@ -23,13 +24,23 @@ CONDENSE_SYSTEM_PROMPT = (
     "Return only the question, with no explanation."
 )
 
+def reasoning_options(model):
+    """Extra request options for reasoning models.
+
+    The gpt-oss models think before they answer and that thinking is billed as
+    output, so it is kept short. Other models reject the option, so they get none.
+    """
+    return {"reasoning_effort": "low"} if "gpt-oss" in model else {}
+
 def build_llm():
     return ChatGroq(
         model_name = LLM_MODEL,
         temperature = 0,
-        max_tokens = 1000,
+        # Covers the model's reasoning as well as the visible answer
+        max_tokens = 1500,
         timeout = None,
-        max_retries = 3
+        max_retries = 3,
+        **reasoning_options(LLM_MODEL)
     )
 
 def load_prompt_config(path = "prompts.yaml"):

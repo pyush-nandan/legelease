@@ -1,6 +1,6 @@
 """Evaluate LegalEase.
 
-    python evaluate.py                    # retrieval metrics + RAGAS on a 20-question sample
+    python evaluate.py                    # retrieval metrics + RAGAS on a 10-question sample
     python evaluate.py --max-samples 0    # same, on every question (needs a paid-tier quota)
     python evaluate.py --retrieval-only   # retrieval metrics only: no API keys, no LLM
 
@@ -19,10 +19,10 @@ import json
 import os
 import sys
 import pandas as pd
-from tenacity import retry, wait_exponential, stop_after_attempt
+from tenacity import retry, retry_if_exception, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
 from ingest_data import CHUNK_OVERLAP, CHUNK_SIZE, INDEX_VERSION
-from main import LLM_MODEL, build_rag_chain, load_prompt_config
+from main import LLM_MODEL, build_rag_chain, load_prompt_config, reasoning_options
 from retriever import BM25_K, RERANK_MODEL, RERANK_TOP_N, VECTOR_K, get_hybrid_retriever
 from text_utils import CONTEXT_SEPARATOR, contains_passage, is_no_answer, split_reference_contexts
 
@@ -35,13 +35,16 @@ CANDIDATE_RECALL_THRESHOLD = 0.85
 # gated metric's scores came back NaN. Averaging only the survivors hides failures.
 MAX_FAILED_FRACTION = float(os.getenv("MAX_FAILED_FRACTION", 0.2))
 
-# LLM-judged samples per run. 20 keeps a run inside Groq's free-tier daily quota.
-DEFAULT_MAX_SAMPLES = int(os.getenv("EVAL_MAX_SAMPLES", 20))
-# The judge defaults to the generator's model so the run fits one free-tier quota.
-# A stronger judge is stricter and more reliable if your quota allows it, e.g.
-#   JUDGE_MODEL=llama-3.3-70b-versatile JUDGE_MAX_TOKENS=4096
-JUDGE_MODEL = os.getenv("JUDGE_MODEL", "llama-3.1-8b-instant")
-JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", 1024))
+# LLM-judged samples per run. Judging one sample takes 12 calls and about 16k
+# tokens, so 10 samples stay inside a 200k-tokens-per-day free-tier quota.
+DEFAULT_MAX_SAMPLES = int(os.getenv("EVAL_MAX_SAMPLES", 10))
+# The judge is a larger model than the generator: it is stricter, and on Groq
+# each model has its own quota, so judging does not eat into generation.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", "openai/gpt-oss-120b")
+JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", 2048))
+
+# Retrying cannot fix a bad request, a bad key or a model that does not exist
+NON_RETRYABLE_STATUS = (400, 401, 403, 404)
 
 CACHE_FILE = "rag_responses_cache.json"
 RETRIEVAL_KS = (5, 10)
@@ -179,7 +182,15 @@ def load_cache(fingerprint: str) -> dict:
     return {}
 
 
-@retry(wait=wait_exponential(multiplier=1, min=4, max=15), stop=stop_after_attempt(5))
+def is_retryable(error) -> bool:
+    return getattr(error, "status_code", None) not in NON_RETRYABLE_STATUS
+
+@retry(
+    retry=retry_if_exception(is_retryable),
+    wait=wait_exponential(multiplier=1, min=4, max=15),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
 async def safe_ainvoke(rag_chain, query):
     return await rag_chain.ainvoke({"input": query})
 
@@ -207,7 +218,14 @@ async def generate_responses_async(testset, rag_chain, fingerprint=""):
         if tasks:
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             for row, response in zip(rows_to_process, responses):
-                if isinstance(response, Exception):
+                if isinstance(response, Exception) and not is_retryable(response):
+                    # Every other question would fail the same way, so stop now
+                    sys.exit(
+                        f"\nStopping: the API rejected the request.\n  {response}\n"
+                        "Check GROQ_API_KEY and COHERE_API_KEY, and that LLM_MODEL "
+                        f"({LLM_MODEL}) and RERANK_MODEL ({RERANK_MODEL}) still exist."
+                    )
+                elif isinstance(response, Exception):
                     print(f"  Error on '{row.question[:40]}': {response}")
                 else:
                     result_dict = {
@@ -272,6 +290,7 @@ def run_ragas(eval_list: list) -> pd.DataFrame:
         provider="openai",
         client=client,
         max_tokens=JUDGE_MAX_TOKENS,
+        **reasoning_options(JUDGE_MODEL),
     )
 
     embedding_model = HuggingFaceEmbeddings(model="all-MiniLM-L6-v2")

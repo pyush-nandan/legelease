@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/LLM-LLaMA_3.1-blueviolet?style=for-the-badge" alt="LLaMA 3.1"/>
+  <img src="https://img.shields.io/badge/LLM-GPT--OSS_20B-blueviolet?style=for-the-badge" alt="GPT-OSS 20B"/>
   <img src="https://img.shields.io/badge/Embeddings-MiniLM--L6--v2-blue?style=for-the-badge" alt="MiniLM"/>
   <img src="https://img.shields.io/badge/Reranker-Cohere_v4-orange?style=for-the-badge" alt="Cohere"/>
   <img src="https://img.shields.io/badge/VectorDB-ChromaDB-green?style=for-the-badge" alt="ChromaDB"/>
@@ -60,7 +60,7 @@ graph TB
 
     subgraph GENERATION["🤖 Generation"]
         PROMPT["Prompt Template (YAML Config)"]
-        LLM["LLaMA 3.1 8B (via Groq)"]
+        LLM["GPT-OSS 20B (via Groq)"]
         ANSWER["Grounded Answer"]
     end
 
@@ -209,17 +209,15 @@ Every average is printed with the number of samples it is based on and the numbe
 
 ```bash
 python evaluate.py --retrieval-only   # layer 1 only, seconds, no API keys
-python evaluate.py                    # both layers; RAGAS on a fixed 20-question sample
+python evaluate.py                    # both layers; RAGAS on a fixed 10-question sample
 python evaluate.py --max-samples 0    # both layers on every question
 ```
 
-By default the LLM layer runs on a fixed, evenly spread sample of 20 answerable questions (plus the 5 unanswerable ones) so that a run fits inside Groq's free-tier daily quota. Responses are cached in `rag_responses_cache.json`; the cache is discarded automatically when the prompt, models or retrieval settings change.
+By default the LLM layer runs on a fixed, evenly spread sample of 10 answerable questions (plus the 5 unanswerable ones). Judging one sample takes 12 judge calls and about 16,000 tokens, so 10 samples fit inside a 200,000-tokens-per-day free-tier quota. Raise `EVAL_MAX_SAMPLES` if your Groq limits allow. Responses are cached in `rag_responses_cache.json`; the cache is discarded automatically when the prompt, models or retrieval settings change.
 
-The judge defaults to the same model as the generator. A stronger judge is stricter and more reliable — set it if your quota allows:
+The judge (`openai/gpt-oss-120b`) is a larger model than the generator (`openai/gpt-oss-20b`). A judge that is stronger than the model it grades is stricter, and on Groq each model has its own quota, so judging does not eat into generation.
 
-```bash
-JUDGE_MODEL=llama-3.3-70b-versatile JUDGE_MAX_TOKENS=4096 python evaluate.py
-```
+If the API rejects a request outright (wrong key, or a model that no longer exists), the run stops at the first question and prints the provider's message instead of retrying every question.
 
 ### Quality Gate
 
@@ -244,7 +242,7 @@ To make a failing run actually block a merge, mark both jobs as required status 
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **LLM** | LLaMA 3.1 8B Instant (via [Groq](https://groq.com)) | Fast inference for answer generation |
+| **LLM** | GPT-OSS 20B (via [Groq](https://groq.com)) | Fast inference for answer generation |
 | **Embeddings** | `all-MiniLM-L6-v2` (HuggingFace) | Document and query embedding |
 | **Vector Store** | ChromaDB | Persistent vector storage and similarity search |
 | **Keyword Search** | BM25 (`rank-bm25`) | Term-frequency based retrieval |
@@ -346,9 +344,9 @@ All optional, set in `.env` or the environment:
 | `MAX_UPLOAD_MB` | `25` | Per-file upload limit |
 | `VECTOR_K` / `BM25_K` | `25` | Candidates each retriever contributes before reranking |
 | `RERANK_TOP_N` | `6` | Chunks kept by the reranker for the LLM |
-| `LLM_MODEL` | `llama-3.1-8b-instant` | Groq model used to answer |
-| `JUDGE_MODEL` / `JUDGE_MAX_TOKENS` | `llama-3.1-8b-instant` / `1024` | Model that scores the RAGAS metrics |
-| `EVAL_MAX_SAMPLES` | `20` | Questions sent through the LLM layer of the evaluation (`0` = all) |
+| `LLM_MODEL` | `openai/gpt-oss-20b` | Groq model used to answer |
+| `JUDGE_MODEL` / `JUDGE_MAX_TOKENS` | `openai/gpt-oss-120b` / `2048` | Model that scores the RAGAS metrics |
+| `EVAL_MAX_SAMPLES` | `10` | Questions sent through the LLM layer of the evaluation (`0` = all) |
 
 ---
 

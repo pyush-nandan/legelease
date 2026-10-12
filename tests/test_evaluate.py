@@ -178,3 +178,35 @@ def test_run_evaluation_end_to_end(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         evaluate.run_evaluation(max_samples=6, testset_path=str(testset_path))
     assert exit_info.value.code == 1
+
+
+def test_rejected_request_stops_the_run_without_retrying(monkeypatch):
+    """A retired model or a bad key fails every question the same way."""
+    import asyncio
+
+    import pytest
+
+    class ModelNotFound(Exception):
+        status_code = 404
+
+    class RateLimited(Exception):
+        status_code = 429
+
+    assert not evaluate.is_retryable(ModelNotFound())
+    assert evaluate.is_retryable(RateLimited())
+    assert evaluate.is_retryable(TimeoutError())
+
+    calls = []
+
+    class DeadModelChain:
+        async def ainvoke(self, inputs):
+            calls.append(inputs["input"])
+            raise ModelNotFound("The model `old-model` has been decommissioned")
+
+    testset = load_testset().head(4)
+    with pytest.raises(SystemExit) as exit_info:
+        asyncio.run(evaluate.generate_responses_async(testset, DeadModelChain(), "fingerprint"))
+    assert "decommissioned" in str(exit_info.value)
+    assert "LLM_MODEL" in str(exit_info.value)
+    # Only the first batch of two was attempted, once each
+    assert len(calls) == 2
