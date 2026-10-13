@@ -210,3 +210,48 @@ def test_rejected_request_stops_the_run_without_retrying(monkeypatch):
     assert "LLM_MODEL" in str(exit_info.value)
     # Only the first batch of two was attempted, once each
     assert len(calls) == 2
+
+
+def test_run_ragas_scores_every_metric(monkeypatch):
+    """The real ragas.evaluate() with a stub judge: no metric may come back NaN."""
+    import ragas.llms
+    from ragas.llms.base import InstructorBaseRagasLLM
+
+    class StubJudge(InstructorBaseRagasLLM):
+        is_async = True
+
+        def generate(self, prompt, response_model):
+            fields = {
+                "StatementGeneratorOutput": {"statements": ["The term may extend to two years."]},
+                "NLIStatementOutput": {"statements": [
+                    {"statement": "The term may extend to two years.", "reason": "stated", "verdict": 1}
+                ]},
+                "Verification": {"reason": "useful", "verdict": 1},
+                "ContextRecallClassifications": {"classifications": [
+                    {"statement": "Two years.", "reason": "in context", "attributed": 1}
+                ]},
+                "ResponseRelevanceOutput": {
+                    "question": "What is the maximum imprisonment under Section 138?",
+                    "noncommittal": 0,
+                },
+            }[response_model.__name__]
+            return response_model(**fields)
+
+        async def agenerate(self, prompt, response_model):
+            return self.generate(prompt, response_model)
+
+    monkeypatch.setattr(ragas.llms, "llm_factory", lambda **kwargs: StubJudge())
+
+    result_df = evaluate.run_ragas([{
+        "user_input": "What is the maximum imprisonment term under Section 138?",
+        "response": "Imprisonment may extend to two years.",
+        "reference": "A term which may be extended to two years.",
+        "reference_contexts": [PASSAGE_A],
+        "retrieved_contexts": ["punished with imprisonment for a term which may be extended to two years", NOISE],
+    }])
+    summary = summarise_ragas(result_df)
+    assert set(summary) == set(evaluate.RAGAS_METRICS)
+    for metric, stats in summary.items():
+        assert stats == {"mean": stats["mean"], "scored": 1, "nan": 0}, metric
+    assert summary["faithfulness"]["mean"] == 1.0
+    assert summary["answer_relevancy"]["mean"] > 0.5

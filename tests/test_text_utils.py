@@ -62,3 +62,8 @@ def test_contains_passage_tolerates_formatting():
     text = "Held:\nthe drawer of the cheque in the instant case\nis only the 1st petitioner, and so on."
     assert contains_passage(text, "the drawer of the cheque in the instant case is only the 1st petitioner")
     assert not contains_passage(text, "the complaint is filed without signature of the authorised person")
+
+
+def test_no_answer_accepts_reworded_refusals():
+    assert is_no_answer("The documents do not fully address this question.")
+    assert is_no_answer("The documents I have don't fully address your question, but here is what I can share.")

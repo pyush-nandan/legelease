@@ -213,7 +213,7 @@ python evaluate.py                    # both layers; RAGAS on a fixed 10-questio
 python evaluate.py --max-samples 0    # both layers on every question
 ```
 
-By default the LLM layer runs on a fixed, evenly spread sample of 10 answerable questions (plus the 5 unanswerable ones). Judging one sample takes 12 judge calls and about 16,000 tokens, so 10 samples fit inside a 200,000-tokens-per-day free-tier quota. Raise `EVAL_MAX_SAMPLES` if your Groq limits allow. Responses are cached in `rag_responses_cache.json`; the cache is discarded automatically when the prompt, models or retrieval settings change.
+By default the LLM layer runs on a fixed, evenly spread sample of 10 answerable questions (plus the 5 unanswerable ones). Judging one sample takes 10 judge calls and about 15,000 tokens, so 10 samples fit inside a 200,000-tokens-per-day free-tier quota. Raise `EVAL_MAX_SAMPLES` if your Groq limits allow. Responses are cached in `rag_responses_cache.json`; the cache is discarded automatically when the prompt, models or retrieval settings change.
 
 The judge (`openai/gpt-oss-120b`) is a larger model than the generator (`openai/gpt-oss-20b`). A judge that is stronger than the model it grades is stricter, and on Groq each model has its own quota, so judging does not eat into generation.
 

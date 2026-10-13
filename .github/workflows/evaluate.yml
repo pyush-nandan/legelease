@@ -5,6 +5,10 @@ on:
         branches:
         - main
     workflow_dispatch:
+        inputs:
+            max_samples:
+                description: 'Questions judged by RAGAS (0 = all; each costs about 15k judge tokens)'
+                default: '10'
 
 jobs:
     # Needs no secrets, so it also runs on pull requests from forks
@@ -72,6 +76,7 @@ jobs:
               env:
                 GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
                 COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+                EVAL_MAX_SAMPLES: ${{ inputs.max_samples || '10' }}
 
             - name: Upload evaluation results
               if: always()
@@ -82,4 +87,5 @@ jobs:
                   evaluation_results.csv
                   evaluation_summary.json
                   retrieval_results.csv
+                  rag_responses_cache.json
                 if-no-files-found: ignore

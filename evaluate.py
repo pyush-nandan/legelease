@@ -21,7 +21,7 @@ import sys
 import pandas as pd
 from tenacity import retry, retry_if_exception, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
-from ingest_data import CHUNK_OVERLAP, CHUNK_SIZE, INDEX_VERSION
+from ingest_data import CHUNK_OVERLAP, CHUNK_SIZE, EMBEDDING_MODEL, INDEX_VERSION
 from main import LLM_MODEL, build_rag_chain, load_prompt_config, reasoning_options
 from retriever import BM25_K, RERANK_MODEL, RERANK_TOP_N, VECTOR_K, get_hybrid_retriever
 from text_utils import CONTEXT_SEPARATOR, contains_passage, is_no_answer, split_reference_contexts
@@ -35,7 +35,7 @@ CANDIDATE_RECALL_THRESHOLD = 0.85
 # gated metric's scores came back NaN. Averaging only the survivors hides failures.
 MAX_FAILED_FRACTION = float(os.getenv("MAX_FAILED_FRACTION", 0.2))
 
-# LLM-judged samples per run. Judging one sample takes 12 calls and about 16k
+# LLM-judged samples per run. Judging one sample takes 10 calls and about 15k
 # tokens, so 10 samples stay inside a 200k-tokens-per-day free-tier quota.
 DEFAULT_MAX_SAMPLES = int(os.getenv("EVAL_MAX_SAMPLES", 10))
 # The judge is a larger model than the generator: it is stricter, and on Groq
@@ -272,8 +272,9 @@ def build_eval_dataset(testset_path: str = "testset.csv"):
 
 def run_ragas(eval_list: list) -> pd.DataFrame:
     from openai import AsyncOpenAI
+    from langchain_huggingface import HuggingFaceEmbeddings
     from ragas import EvaluationDataset, evaluate
-    from ragas.embeddings import HuggingFaceEmbeddings
+    from ragas.embeddings.base import LangchainEmbeddingsWrapper
     from ragas.llms import llm_factory
     from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
     from ragas.run_config import RunConfig
@@ -293,11 +294,17 @@ def run_ragas(eval_list: list) -> pd.DataFrame:
         **reasoning_options(JUDGE_MODEL),
     )
 
-    embedding_model = HuggingFaceEmbeddings(model="all-MiniLM-L6-v2")
+    # AnswerRelevancy calls embed_query()/embed_documents(), which ragas' own
+    # HuggingFaceEmbeddings class does not have, so every score came back NaN.
+    embedding_model = LangchainEmbeddingsWrapper(
+        HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    )
 
     metrics = [
         Faithfulness(llm = llm),
-        AnswerRelevancy(llm = llm, embeddings = embedding_model),
+        # ragas makes one call per sample with this kind of judge whatever the
+        # strictness, so ask for one question rather than warn about three
+        AnswerRelevancy(llm = llm, embeddings = embedding_model, strictness = 1),
         ContextPrecision(llm = llm),
         ContextRecall(llm = llm)
     ]
@@ -385,7 +392,10 @@ def print_summary(summary: dict):
             "candidates": "Hybrid candidates (before rerank)",
             "final": "Reranked chunks sent to the LLM",
         }[stage]
-        scores = "  ".join(f"{k} {v:.3f}" for k, v in stats.items() if k != "questions")
+        # Candidate precision is left out: that stage hands the reranker ~40
+        # chunks on purpose, so only one or two of them can match a passage
+        hidden = ("questions", "precision") if stage == "candidates" else ("questions",)
+        scores = "  ".join(f"{k} {v:.3f}" for k, v in stats.items() if k not in hidden)
         print(f"{label}, {stats['questions']} questions:\n  {scores}")
 
     for metric, stats in summary.get("ragas", {}).items():
@@ -436,6 +446,9 @@ def run_evaluation(retrieval_only=False, max_samples=DEFAULT_MAX_SAMPLES,
             "questions": len(unanswerable),
             "declined": sum(is_no_answer(s["response"]) for s in unanswerable),
         }
+        for s in unanswerable:
+            if not is_no_answer(s["response"]):
+                print(f"\n  Not declined: {s['user_input']}\n    -> {s['response'][:300]!r}")
 
         answerable = [s for s in eval_list if s["reference_contexts"]]
         if answerable:

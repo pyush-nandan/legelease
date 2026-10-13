@@ -14,7 +14,8 @@ NO_ANSWER_PHRASES = [
     "i don't know",
     "don't have enough information",
     "cannot answer",
-    "don't fully address this question",
+    "don't fully address",
+    "do not fully address",
     "do not contain sufficient",
     "insufficient regulatory context",
 ]
