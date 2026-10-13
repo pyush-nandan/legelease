@@ -1,6 +1,10 @@
 # LegalEase — Custom dark theme
 # Deep navy tones with warm gold accents — evokes legal authority and trust
 
+[server]
+# Per-file upload limit in MB (keep in sync with MAX_UPLOAD_MB in app.py)
+maxUploadSize = 25
+
 [theme]
 base = "dark"
 primaryColor = "#C9A227"
